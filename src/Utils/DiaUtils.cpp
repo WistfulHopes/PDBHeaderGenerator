@@ -1,5 +1,7 @@
 #include "Utils/DiaUtils.h"
 
+#include <cassert>
+#include <iostream>
 #include <sstream>
 #include <vector>
 #include <unordered_set>
@@ -27,14 +29,16 @@ DiaChildSymbolIterator::DiaChildSymbolIterator( const CComPtr<IDiaSymbol>& InPar
 {
     const HRESULT EnumeratorOpenResult = InParentSymbol->findChildren(InSymbolType, InName, CompareFlags, &UnderlyingEnumerator);
     assert( SUCCEEDED( EnumeratorOpenResult ) );
-    assert( SUCCEEDED( UnderlyingEnumerator->get_Count( &ItemCount ) ) );
+    auto result = UnderlyingEnumerator->get_Count( &ItemCount );
+    assert( SUCCEEDED( result ) );
 }
 
 DiaChildSymbolIterator::DiaChildSymbolIterator(const CComPtr<IDiaSymbol>& InParentSymbol, enum SymTagEnum InSymbolType, const WCHAR* InName, DWORD CompareFlags, DWORD SymbolRVA)
 {
     const HRESULT EnumeratorOpenResult = InParentSymbol->findChildrenExByRVA(InSymbolType, InName, CompareFlags, SymbolRVA, &UnderlyingEnumerator);
     assert( SUCCEEDED( EnumeratorOpenResult ) );
-    assert( SUCCEEDED( UnderlyingEnumerator->get_Count( &ItemCount ) ) );
+    auto result = UnderlyingEnumerator->get_Count( &ItemCount );
+    assert( SUCCEEDED( result ) );
 }
 
 DiaChildSymbolIterator::operator bool() const
@@ -45,7 +49,8 @@ DiaChildSymbolIterator::operator bool() const
 CComPtr<IDiaSymbol> DiaChildSymbolIterator::operator*() const
 {
     CComPtr<IDiaSymbol> NextSymbol;
-    assert( SUCCEEDED( UnderlyingEnumerator->Item( CurrentIndex, &NextSymbol ) ) );
+    auto result = UnderlyingEnumerator->Item( CurrentIndex, &NextSymbol );
+    assert( SUCCEEDED( result ) );
     return NextSymbol;
 }
 

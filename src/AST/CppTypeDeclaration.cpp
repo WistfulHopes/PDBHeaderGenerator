@@ -1051,12 +1051,17 @@ bool FTypeTextParseHelper::ParseTemplateArgumentsInternal( std::vector<TypeTempl
     {
         // Stop parsing template arguments if it's end of line or is a template bracket
         const TypeTextToken CurrentToken = PeekNextToken();
+        bool bIsFunctionType = false;
         if ( CurrentToken.Type == ETypeTextToken::EndOfLine || CurrentToken.Type == ETypeTextToken::TemplateRBracket )
         {
             return true;
         }
+        if ( PeekNextNextToken().Type == ETypeTextToken::CallingConvention )
+        {
+            bIsFunctionType = true;
+        }
         // We expect comma otherwise, unless it's first argument
-        if ( CurrentToken.Type != ETypeTextToken::Comma && !bIsFirstArgument )
+        else if ( CurrentToken.Type != ETypeTextToken::Comma && !bIsFirstArgument )
         {
             assert(!L"Expected comma, > or end of stream, got a other token");
             return false;
@@ -1068,9 +1073,10 @@ bool FTypeTextParseHelper::ParseTemplateArgumentsInternal( std::vector<TypeTempl
         }
         bIsFirstArgument = false;
 
+        
         // We expect to parse either a number constant, a pointer, or a type name here
         const TypeTextToken ArgumentFirstToken = PeekNextToken();
-        if ( ArgumentFirstToken.Type == ETypeTextToken::Integer )
+        if ( ArgumentFirstToken.Type == ETypeTextToken::Integer && !bIsFunctionType )
         {
             ConsumeNextToken();
 
@@ -1081,7 +1087,7 @@ bool FTypeTextParseHelper::ParseTemplateArgumentsInternal( std::vector<TypeTempl
             OutTemplateArguments.push_back(TemplateArgument);
         }
         // Check for wildcard integer constant, in case we are allowed to parse them.
-        else if ( ArgumentFirstToken.Type == ETypeTextToken::IntegerWildcard && bAllowWildcards )
+        else if ( ArgumentFirstToken.Type == ETypeTextToken::IntegerWildcard && bAllowWildcards && !bIsFunctionType )
         {
             ConsumeNextToken();
 
@@ -1091,7 +1097,7 @@ bool FTypeTextParseHelper::ParseTemplateArgumentsInternal( std::vector<TypeTempl
             OutTemplateArguments.push_back(TemplateArgument);
         }
         // Check for reference, that would parse as a member function pointer
-        else if ( ArgumentFirstToken.Type == ETypeTextToken::Reference )
+        else if ( ArgumentFirstToken.Type == ETypeTextToken::Reference && !bIsFunctionType )
         {
             assert(!L"Data/function pointer as a template instantiation argument is not supported (yet). If you assert here, please poke me to add parsing of these");
             return false;
@@ -1175,6 +1181,16 @@ std::shared_ptr<ITypeDeclaration> FTypeTextParseHelper::ParseCompleteTypeDeclara
             ConsumeNextToken();
             // Arrays are the final token in the typename, anything following the array type is next type or part of higher level structure
             return CurrentType;
+        }
+        else if ( NextTypeToken.Type == ETypeTextToken::CallingConvention )
+        {
+            const std::shared_ptr<ITypeDeclaration> FunctionTypeDeclaration = ParseFunctionTypeDeclaration( CurrentType );
+            if ( FunctionTypeDeclaration == nullptr )
+            {
+                assert(!L"Failed to parse function pointer type declaration");
+                return nullptr;
+            }
+            return FunctionTypeDeclaration;
         }
         // Parse function signature type, or dumb type ordering rules
         else if ( NextTypeToken.Type == ETypeTextToken::LBracket )
@@ -1413,6 +1429,158 @@ std::shared_ptr<ITypeDeclaration> FTypeTextParseHelper::ParseFunctionPointerDecl
     return FunctionType;
 }
 
+std::shared_ptr<ITypeDeclaration> FTypeTextParseHelper::ParseFunctionTypeDeclaration( const std::shared_ptr<ITypeDeclaration>& ReturnType)
+{
+    TypeTextToken NextTypeToken = PeekNextToken();
+
+    std::shared_ptr<ITypeDeclaration> OuterTypeIdentifier;
+    std::optional<ECallingConvention> CallingConvention;
+    bool bIsFunctionTypeConst = false;
+    bool bIsPotentiallyPointerOrReferenceToArray = true;
+
+    // If this is an identifier (or a global namespace scope delimiter), we are parsing a member function pointer type
+    if ( NextTypeToken.Type == ETypeTextToken::Identifier || NextTypeToken.Type == ETypeTextToken::ScopeDelimiter )
+    {
+        OuterTypeIdentifier = ParseSimpleTypeDeclaration();
+        if ( !OuterTypeIdentifier )
+        {
+            assert(!L"Failed to parse member function owner class typename when parsing member function pointer declaration");
+            return nullptr;
+        }
+        NextTypeToken = PeekNextToken();
+
+        // Next token should be a scope delimiter following the type and separating it from function pointer
+        if ( NextTypeToken.Type != ETypeTextToken::ScopeDelimiter )
+        {
+            assert(!L"Expected ::, got another token when parsing member function pointer class name");
+            return nullptr;
+        }
+        ConsumeNextToken();
+        NextTypeToken = PeekNextToken();
+        // Member function pointer syntax definitely cannot be parsed as reference to array
+        bIsPotentiallyPointerOrReferenceToArray = false;
+    }
+
+    // Potentially parse calling convention in case we did not parse a outer type
+    if ( OuterTypeIdentifier == nullptr && NextTypeToken.Type == ETypeTextToken::CallingConvention )
+    {
+        ConsumeNextToken();
+        CallingConvention = NextTypeToken.CallingConvention;
+        NextTypeToken = PeekNextToken();
+        // If we found a calling convention, this is not an reference to array
+        bIsPotentiallyPointerOrReferenceToArray = false;
+    }
+
+    // Potentially consume out-of-order const modifier that would be applied to the pointer
+    if ( NextTypeToken.Type == ETypeTextToken::TypeModifier && NextTypeToken.TypeModifier == ETypeModifier::Const )
+    {
+        ConsumeNextToken();
+        bIsFunctionTypeConst = true;
+        NextTypeToken = PeekNextToken();
+    }
+
+    // Potentially consume calling convention if we have not done so before
+    // We cannot parse calling convention if we parsed reference instead of a pointer
+    if ( NextTypeToken.Type == ETypeTextToken::CallingConvention && !CallingConvention.has_value() )
+    {
+        ConsumeNextToken();
+        CallingConvention = NextTypeToken.CallingConvention;
+        NextTypeToken = PeekNextToken();
+        // If we found a calling convention, this is not an reference to array
+        bIsPotentiallyPointerOrReferenceToArray = false;
+    }
+
+    // And also potentially consume const modifier
+    if ( NextTypeToken.Type == ETypeTextToken::TypeModifier && NextTypeToken.TypeModifier == ETypeModifier::Const && !bIsFunctionTypeConst )
+    {
+        ConsumeNextToken();
+        bIsFunctionTypeConst = true;
+        NextTypeToken = PeekNextToken();
+    }
+
+    // Next should be an opening bracket for the argument list
+    if ( NextTypeToken.Type != ETypeTextToken::LBracket )
+    {
+        assert(!L"Expected ( preceding the function pointer argument list declaration, got another token");
+        return nullptr;
+    }
+    ConsumeNextToken();
+    NextTypeToken = PeekNextToken();
+
+    // Parse function argument list
+    std::vector<std::pair<std::wstring, std::shared_ptr<ITypeDeclaration>>> FunctionArguments;
+    bool bIsVariadicArguments = false;
+    while ( true )
+    {
+        // Check if this is a variadic arguments specifier before we digest it as a type
+        if ( NextTypeToken.Type != ETypeTextToken::VariadicArguments )
+        {
+            const std::shared_ptr<ITypeDeclaration> ArgumentType = ParseCompleteTypeDeclaration();
+            if ( ArgumentType == nullptr )
+            {
+                assert(!L"Failed to parse function pointer argument type declaration");
+                return nullptr;
+            }
+
+            NextTypeToken = PeekNextToken();
+
+            // Consume next token if it is a parameter name
+            std::wstring ParameterName;
+            if ( NextTypeToken.Type == ETypeTextToken::Identifier )
+            {
+                ConsumeNextToken();
+                ParameterName = NextTypeToken.Identifier;
+                NextTypeToken = PeekNextToken();
+            }
+            FunctionArguments.push_back({ ParameterName, ArgumentType });
+        }
+        // Digest variadic arguments specifier otherwise
+        else
+        {
+            ConsumeNextToken();
+            bIsVariadicArguments = true;
+            NextTypeToken = PeekNextToken();
+        }
+
+        // Next token should be either a comma or a bracket
+        if ( NextTypeToken.Type == ETypeTextToken::RBracket )
+        {
+            ConsumeNextToken();
+            NextTypeToken = PeekNextToken();
+            break;
+        }
+        // We should never have more arguments after variadic argument specifier, comma at this point is an error
+        if ( NextTypeToken.Type != ETypeTextToken::Comma && !bIsVariadicArguments )
+        {
+            assert(!L"Expected , or ) after argument type and name declaration, got another token");
+            return nullptr;
+        }
+        ConsumeNextToken();
+        NextTypeToken = PeekNextToken();
+    }
+
+    // We might optionally parse const modifier right after if this is a member function
+    bool bIsConstMemberFunction = false;
+    if ( OuterTypeIdentifier != nullptr && NextTypeToken.Type == ETypeTextToken::TypeModifier && NextTypeToken.TypeModifier == ETypeModifier::Const )
+    {
+        ConsumeNextToken();
+        NextTypeToken = PeekNextToken();
+        bIsConstMemberFunction = true;
+    }
+
+    // Create the resulting type
+    const std::shared_ptr<FunctionTypeDeclaration> FunctionType = std::make_shared<FunctionTypeDeclaration>();
+    FunctionType->Arguments = FunctionArguments;
+    FunctionType->ReturnType = ReturnType;
+    FunctionType->bIsFunctionPointer = true;
+    FunctionType->OwnerType = OuterTypeIdentifier;
+    FunctionType->bIsConstMemberFunction = bIsConstMemberFunction;
+    FunctionType->bIsVariadicArguments = bIsVariadicArguments;
+    FunctionType->CallingConvention = CallingConvention;
+    FunctionType->bIsConst = bIsFunctionTypeConst;
+    return FunctionType;
+}
+
 static bool IsTokenValidTypenameStart( const TypeTextToken& Token )
 {
     return Token.Type == ETypeTextToken::Identifier || Token.Type == ETypeTextToken::ScopeDelimiter;
@@ -1510,11 +1678,11 @@ std::shared_ptr<ITypeDeclaration> FTypeTextParseHelper::ParsePartialSimpleDeclar
     // Check for template instantiation
     else if ( TypePostfixToken.Type == ETypeTextToken::TemplateLBracket )
     {
-        if ( bHasEnumSpecifier )
+        /*if ( bHasEnumSpecifier )
         {
             assert(!L"Encountered template instantiation after enum specifier. Enumerations cannot be templated");
             return nullptr;
-        }
+        }*/
         if ( FundamentalType.has_value() || bIsVoidType )
         {
             assert(!L"Encountered template instantiation after a fundamental type. Fundamental types are not templates.");
@@ -1630,7 +1798,7 @@ std::shared_ptr<ITypeDeclaration> FTypeTextParseHelper::ParsePartialSimpleDeclar
         return nullptr;
     }
     // Make sure void type does not have any type modifiers
-    if ( bIsVoidType && !AppliedTypeModifiers.empty() )
+    if ( bIsVoidType && !AppliedTypeModifiers.empty() && TypePostfixToken.Type != ETypeTextToken::Pointer )
     {
         assert(!L"Void type cannot have any type modifiers (including 'const')");
         return nullptr;
@@ -2210,8 +2378,9 @@ int32_t FTypeTextParseHelper::PeekNextTokenInternal(int32_t CurrentOffset, TypeT
             }
             CurrentOffset++; // skip over the closing bracket
 
-            const std::wstring_view LambdaTextView( &RawText[UnnamedTypeNameStartOffset], CurrentOffset - UnnamedTypeNameStartOffset );
-            OutToken.LambdaIndex = std::stoll( std::wstring( LambdaTextView ) );
+            const std::wstring_view LambdaTextView( &RawText[UnnamedTypeNameStartOffset], CurrentOffset - UnnamedTypeNameStartOffset - 17 );
+            const std::wstring_view LambdaTextView2( &RawText[UnnamedTypeNameStartOffset + 16], CurrentOffset - UnnamedTypeNameStartOffset - 17 );
+            OutToken.LambdaIndex = std::stoull( std::wstring( LambdaTextView ), nullptr, 16 ) ^ std::stoull( std::wstring( LambdaTextView2 ), nullptr, 16 );
             return CurrentOffset;
         }
 

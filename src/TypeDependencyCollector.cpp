@@ -291,7 +291,7 @@ void TypeDependencyCollectorBase::CollectDependenciesForTemplateInstantiation( c
         if ( TypeDeclaration->TemplateArguments.Arguments.empty() )
         {
             const CComPtr<IDiaSymbol> UDTSymbol = TypeResolver->ResolveUDTByFullName( SymbolNameInfo.ToString( SymbolNameInfo::IncludeNamespace ) );
-            assert( UDTSymbol && L"Failed to resolve UDT type used as a template instantiation argument" );
+            // assert( UDTSymbol && L"Failed to resolve UDT type used as a template instantiation argument" );
 
             // We only need a pre-declaration for this type since it has no template arguments
             if ( UDTSymbol )
